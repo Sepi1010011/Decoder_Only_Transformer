@@ -12,22 +12,24 @@ device = get_device()
 load_model = torch.load("Decoder_Only_Transformer_v1.pth")
 
 load_model.eval()
-def text_generation(sentence):
-  sentence = (sentence,)
-  for word_counter in range(max_sequence_length):
-    self_attention_mask = create_decoder_masks(sentence)
-    predictions = load_model(sentence,
-                              self_attention_mask.to(device), 
-                              dec_start_token=True,
-                              dec_end_token=False)
-    
-    next_token_prob_distribution = predictions[0][word_counter]
-    next_token_index = torch.argmax(next_token_prob_distribution).item()
-    next_token = index_to_language[next_token_index] # type: ignore
-    text_generated = (sentence[0] + next_token, )
-    if next_token == END_TOKEN:
-      break
-  return text_generated[0]
+def text_generation(sentence, temperature=1.0):
+    sentence = (sentence,)
+    for word_counter in range(max_sequence_length):
+        self_attention_mask = create_decoder_masks(sentence)
+        predictions = load_model(sentence,
+                                 self_attention_mask.to(device), 
+                                 dec_start_token=True,
+                                 dec_end_token=False)
+        
+        next_token_prob_distribution = predictions[0][word_counter] / temperature
+        next_token_prob_distribution = torch.softmax(next_token_prob_distribution, dim=-1)
+        next_token_index = torch.multinomial(next_token_prob_distribution, 1).item()
+        next_token = index_to_language[next_token_index] # type: ignore
+        text_generated = (sentence[0] + next_token,)
+        if next_token == END_TOKEN:
+            break
+    return text_generated[0]
+
 
 
 # # <<<<<<<<<<<<<<<<<<<<<<<<<<<For Fine Tuning the model >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
