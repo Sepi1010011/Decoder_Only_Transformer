@@ -15,7 +15,7 @@ import torch.nn.functional as F
 d_model = 128
 num_layers = 4
 num_heads = 2
-batch_size = 16
+batch_size = 15
 learning_rate = 3e-4
 block_number = 4
 drop_prob = 0.2
