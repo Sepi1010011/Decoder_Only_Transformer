@@ -2,24 +2,31 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
-from decoder_only_transformer import create_decoder_masks, END_TOKEN, index_to_language, max_sequence_length, learning_rate
-
+from decoder_only_transformer import (GPTLanguageModel,d_model, ffn_hidden, num_heads, 
+                                      drop_prob, num_layers, max_sequence_length, 
+                                      en_vocab_size, language_to_index, create_decoder_masks, START_TOKEN,
+                                      END_TOKEN, index_to_language, max_sequence_length, 
+                                      learning_rate, PADDING_TOKEN)
 
 def get_device():
     return torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-device = get_device()
-load_model = torch.load("Decoder_Only_Transformer_v1.pth")
 
-load_model.eval()
-def text_generation(sentence, temperature=1.0):
+model = GPTLanguageModel(d_model, ffn_hidden, num_heads, drop_prob, num_layers, max_sequence_length, en_vocab_size, language_to_index, START_TOKEN, END_TOKEN, PADDING_TOKEN)
+device = get_device()
+model = model.to(device)
+load_model = torch.load("Decoder_Only_Transformer_v1.pth", map_location=device)
+model.load_state_dict(load_model)
+
+model.eval()
+def text_generation(sentence, temperature=0.4):
     sentence = (sentence,)
     for word_counter in range(max_sequence_length):
         self_attention_mask = create_decoder_masks(sentence)
-        predictions = load_model(sentence,
+        predictions = model(sentence,
                                  self_attention_mask.to(device), 
                                  dec_start_token=True,
-                                 dec_end_token=False)
+                                 dec_end_token=True)
         
         next_token_prob_distribution = predictions[0][word_counter] / temperature
         next_token_prob_distribution = torch.softmax(next_token_prob_distribution, dim=-1)
@@ -65,10 +72,10 @@ def text_generation(sentence, temperature=1.0):
 
 if __name__ == "__main__":
     print("HELLO THIS IS GPT V1 YOU CAN CHAT.....")
+    num_op = int(input("Hello: if you want to chat enter 1 else enter 2 for Fine_Tuning: "))
     while True:
-        num_op = int(input("Hello: if you want to chat enter 1 else enter 2 for Fine_Tuning"))
         if num_op == 1:
-            chat = input("HELLO THIS IS BOT: ")
+            chat = input("BOT: ")
             print(text_generation(chat))
         else:
             dataset = input("Enter your dataset")
