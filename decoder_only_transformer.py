@@ -3,6 +3,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F 
+from transformers import BertTokenizer, BertModel
 
 
 # INPUT EMBEDDING 
@@ -12,11 +13,9 @@ import torch.nn.functional as F
 # LINEAR SOFTMAX 
 # OUTPUT PROBABILITES
 
-d_model = 128
+d_model = 768
 num_layers = 4
 num_heads = 2
-batch_size = 15
-learning_rate = 0.0006
 block_number = 4
 drop_prob = 0.2
 NEG_INFTY = -1e9
@@ -24,15 +23,11 @@ num_epochs = 10
 ffn_hidden = 2048
 
 
-START_TOKEN = '<start>'
-END_TOKEN = '<end>'
-PADDING_TOKEN = '<pad>'
-TOTAL_SENTENCES = 100000
-max_sequence_length = 2048
-english_vocabulary = [START_TOKEN, ' ', '!', '"', '#', '$', '%', '&', "'", '(', ')', '*', '+', ',', '-', '.', '/', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',':', '<', '=', '>', '?', '@','[', ']', '^', '_', '`', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l','m', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '{', '|', '}', '~', PADDING_TOKEN, END_TOKEN]
-en_vocab_size = len(english_vocabulary)
-language_to_index = {v:k for k,v in enumerate(english_vocabulary)}
-index_to_language = {k:v for k,v in enumerate(english_vocabulary)}
+PRETRAINED_MODEL = "bert-base-uncased"
+TOTAL_SENTENCES = 200000
+max_sequence_length = 512
+en_vocab_size = 30522
+
 
 
 def get_device():
@@ -69,7 +64,6 @@ class PositionalEncoding(nn.Module):
         super().__init__()
         self.max_sequence_length = max_sequence_length
         self.d_model = d_model
-        self.position_embedding = nn.Embedding(max_sequence_length, d_model)
 
     def forward(self):
         even_i = torch.arange(0, self.d_model, 2).float()
@@ -83,44 +77,30 @@ class PositionalEncoding(nn.Module):
     
 
 class SentenceEmbedding(nn.Module):
-    "For a given sentence, create an embedding"
-    def __init__(self, max_sequence_length, d_model, language_to_index, START_TOKEN, END_TOKEN, PADDING_TOKEN):
+    
+    def __init__(self, d_model, max_sequence_length):
         super().__init__()
-        self.vocab_size = len(language_to_index)
+        self.d_model = d_model
         self.max_sequence_length = max_sequence_length
-        self.embedding = nn.Embedding(self.vocab_size, d_model)
-        self.language_to_index = language_to_index
         self.position_encoder = PositionalEncoding(d_model, max_sequence_length)
-        self.dropout = nn.Dropout(p=0.1)
-        self.START_TOKEN = START_TOKEN
-        self.END_TOKEN = END_TOKEN
-        self.PADDING_TOKEN = PADDING_TOKEN
-    
-    def batch_tokenize(self, batch, start_token, end_token):
+        self.bert_model = BertModel.from_pretrained(PRETRAINED_MODEL)
+        self.tokenizer = BertTokenizer.from_pretrained(PRETRAINED_MODEL)
+        self.linear = nn.Linear(self.bert_model.config.hidden_size, d_model).to("cuda") # type: ignore
+        self.dropout = nn.Dropout(p=0.2).to("cuda")
 
-        def tokenize(sentence, start_token, end_token):
-            sentence_word_indicies = [self.language_to_index[token] for token in list(sentence)]
-            if start_token:
-                sentence_word_indicies.insert(0, self.language_to_index[self.START_TOKEN])
-            if end_token:
-                sentence_word_indicies.append(self.language_to_index[self.END_TOKEN])
-            for _ in range(len(sentence_word_indicies), self.max_sequence_length):
-                sentence_word_indicies.append(self.language_to_index[self.PADDING_TOKEN])
-            return torch.tensor(sentence_word_indicies)
-
-        tokenized = []
-        for sentence_num in range(len(batch)):
-            tokenized.append(tokenize(batch[sentence_num], start_token, end_token) )
-        tokenized = torch.stack(tokenized)
-        return tokenized.to(get_device())
-    
-    def forward(self, x, start_token, end_token): 
-        x = self.batch_tokenize(x, start_token, end_token)
-        x = self.embedding(x)
-        pos = self.position_encoder().to(get_device())
-        x = self.dropout(x + pos)
-        return x
-
+    def forward(self, x):
+        encoder = self.tokenizer(x, padding="max_length", truncation=True, max_length = self.max_sequence_length, return_tensors="pt")
+        input_ids = encoder["input_ids"]
+        attention_mask = encoder["attention_mask"]
+        with torch.no_grad():
+            outputs = self.bert_model(input_ids.to("cuda"), attention_mask=attention_mask.to("cuda")) # type:ignore
+            word_embedded = outputs.last_hidden_state
+        
+        pos = self.position_encoder().to("cuda")
+        word_embedded = self.linear(word_embedded)
+        word_embedded = self.dropout(word_embedded + pos)
+        return word_embedded
+            
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, d_model, num_heads):
@@ -217,23 +197,13 @@ class TransformerBlocks(nn.Module):
 class DecoderLayer(nn.Module):
     def __init__(self, d_model, num_heads, drop_prob, ffn_hidden):
         super(DecoderLayer, self).__init__()
-        self.block1 = TransformerBlocks(d_model, ffn_hidden, num_heads)
-        self.block2 = TransformerBlocks(d_model, ffn_hidden, num_heads)
-        self.block3 = TransformerBlocks(d_model, ffn_hidden, num_heads)
-        self.block4 = TransformerBlocks(d_model, ffn_hidden, num_heads)
-        
+        self.block = SequentialDecoder(*[TransformerBlocks(d_model, ffn_hidden, num_heads) for _ in range(block_number)])
         self.dropout1 = nn.Dropout(p=drop_prob)
-        self.dropout2 = nn.Dropout(p=drop_prob)
-        self.dropout3 = nn.Dropout(p=drop_prob)
+        
     
     def forward(self, x, self_attention_mask):
-        x = self.block1(x, decoder_mask=self_attention_mask)
+        x = self.block(x, self_attention_mask)
         x = self.dropout1(x)
-        x = self.block2(x, decoder_mask=self_attention_mask)
-        x = self.dropout2(x)
-        x = self.block3(x, decoder_mask=self_attention_mask)
-        x = self.dropout3(x)
-        x = self.block4(x, decoder_mask=self_attention_mask)
         return x
         
     
@@ -246,28 +216,28 @@ class SequentialDecoder(nn.Sequential):
         
 
 class Decoder(nn.Module):
-    def __init__(self, d_model, ffn_hidden, num_heads, drop_prob, num_layers, max_sequence_length, language_to_index, START_TOKEN, END_TOKEN, PADDING_TOKEN) -> None:
+    def __init__(self, d_model, ffn_hidden, num_heads, drop_prob, num_layers, max_sequence_length) -> None:
         super(Decoder, self).__init__() 
-        self.embedding = SentenceEmbedding(max_sequence_length, d_model, language_to_index, START_TOKEN, END_TOKEN, PADDING_TOKEN)
+        self.embedding = SentenceEmbedding(d_model, max_sequence_length)
         self.layer = SequentialDecoder(*[DecoderLayer(d_model, num_heads, drop_prob, ffn_hidden) for _ in range(num_layers)])
     
-    def forward(self, x, self_attention_mask, start_token, end_token):
-        x = self.embedding(x, start_token, end_token)
+    def forward(self, x, self_attention_mask):
+        x = self.embedding(x)
         x = self.layer(x, self_attention_mask)
         return x 
      
      
 class GPTLanguageModel(nn.Module):
-    def __init__(self, d_model, ffn_hidden, num_heads, drop_prob, num_layers,max_sequence_length, en_vocab_size, language_to_index, START_TOKEN, END_TOKEN, PADDING_TOKEN) -> None:
+    def __init__(self, d_model, ffn_hidden, num_heads, drop_prob, num_layers,max_sequence_length, en_vocab_size) -> None:
         super(GPTLanguageModel, self).__init__()
-        self.decoder = Decoder(d_model, ffn_hidden, num_heads, drop_prob, num_layers, max_sequence_length, language_to_index, START_TOKEN, END_TOKEN, PADDING_TOKEN)
+        self.decoder = Decoder(d_model, ffn_hidden, num_heads, drop_prob, num_layers, max_sequence_length)
         self.norm = LayerNormalization(parameters_shape=[d_model])
         self.linear = nn.Linear(d_model, en_vocab_size)
         self.softmax = nn.Softmax(dim=-1)
         self.device = get_device()
-    
-    def forward(self, x, self_attention_mask, dec_start_token=False, dec_end_token=False):
-        x = self.decoder(x, self_attention_mask, start_token=dec_start_token, end_token=dec_end_token)
+            
+    def forward(self, x, self_attention_mask):
+        x = self.decoder(x, self_attention_mask)
         out = self.norm(x)
         out = self.linear(out)
         out = self.softmax(out)
